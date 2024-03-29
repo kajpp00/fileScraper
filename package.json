@@ -1,0 +1,28 @@
+{
+  "name": "filescraper",
+  "version": "1.0.0",
+  "description": "",
+  "main": "input2.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "app": "nodemon index2.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "dependencies": {
+    "jsonexport": "^3.2.0",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.6.0",
+    "node-html-parser": "^6.1.5",
+    "node-xlsx": "^0.23.0",
+    "pdf-parse": "^1.1.1",
+    "pptx2json": "^0.0.8",
+    "prompt-sync": "^4.2.0",
+    "tesseract.js": "^4.1.1",
+    "textract": "^0.20.0",
+    "xmldom": "^0.6.0"
+  }
+}
