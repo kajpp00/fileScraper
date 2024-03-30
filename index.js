@@ -13,7 +13,6 @@ const JSZip = require("jszip");
 // const checkRelationshipsForFile = require('./checkRelationshipsForFile')
 // const checkRelationships = require('./checkRelationships')
 const { DOMParser } = require("xmldom");
-const { log } = require("console");
 
 const getDirRecursive = async (dir) => {
     try {
