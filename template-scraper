@@ -1,0 +1,323 @@
+const fs = require("fs");
+const fsPromise = require("fs/promises");
+const pdf = require("pdf-parse");
+const path = require("path");
+const mammoth = require("mammoth");
+const jsonexport = require("jsonexport");
+const xlsx = require("node-xlsx");
+const JSZip = require('jszip');
+const HTMLParser = require('node-html-parser');
+const { DOMParser } = require('xmldom');
+const WordExtractor = require("word-extractor");
+
+const directoryPath = ['files-for-testing'];
+const rootFolder = '';
+const baseURI = 'https://www.tamuk.edu'
+const exportDestination = 'exports'
+const exportFileName = 'testing-scraper-export'
+const fileExt = ["pdf", "docx", "doc", "xlsx", "pptx", "html"];
+
+const mainKeywords = [
+    "Diversity",
+    "Equity",
+    "Inclusion",
+    "Access"
+];
+
+const secondaryKeywords = [
+    "Hispanic",
+    "African American",
+    "Minority",
+    "Citizen",
+    "Citizenship",
+    "Women",
+    "Marginalized"
+];
+
+let htmlPages = []
+
+async function findHtmlFiles(folderPath) {
+    let htmlFiles = [];
+    try {
+        const pages = await fsPromise.readdir(folderPath);
+        for (const file of pages) {
+            const filePath = path.join(folderPath, file);
+            const stats = await fsPromise.stat(filePath);
+            if (stats.isDirectory()) {
+                htmlFiles = [...htmlFiles, ...await findHtmlFiles(filePath)];
+            } else if (stats.isFile() && file.endsWith('.html')) {
+                htmlFiles.push(filePath);
+            }
+        }
+    } catch (error) {
+        console.error('Error while reading directory:', error);
+    }
+    return htmlFiles;
+}
+
+
+
+(async () => {
+    await new Promise((resolve, reject) => {
+        findHtmlFiles(rootFolder).then(htmlFiles => {
+            htmlPages.push(htmlFiles);
+            resolve();
+        }).catch(error => {
+            console.error('Error:', error);
+            reject();
+        });
+    });
+
+    const fileArr = [];
+
+    directoryPath.forEach(directory => {
+        getDirRecursive(directory).then((files) => {
+            const pathScanPromise = new Promise((resolve, reject) => {
+                if (files.length) {
+                    fileArr.push(...files);
+                }
+                resolve(fileArr);
+            }).then(async res => {
+                jsonexport(res, function (err, csv) {
+                    if (err) {
+                        return console.log(err);
+                    } else {
+                        const datetime = new Date().toISOString().slice(0, 10);
+                        fs.writeFile(`${exportDestination}${exportFileName}-${datetime}.csv`, csv, (err) => {
+                            if (err) return console.log(err);
+                        });
+                    }
+                });
+            });
+        });
+    });
+})();
+
+async function checkRelationshipsForFile(item, ext, dir) {
+    try {
+        const relationships = [];
+        for (const page of htmlPages[0]) {
+            if (ext !== 'html') {
+                const fileContent = fs.readFileSync(page, 'utf-8');
+                const filePath = path.resolve(dir, item);
+                const relationshipUrl = rootFolder !== '' ? `${baseURI}${page.split('wwwroot').pop().replace(/\\/g, '/')}` : baseURI;
+
+                const linksRegex = /<a\s+(?:[^>]*?\s+)?href=(["'])(.*?)\1/g;
+                let match;
+                while ((match = linksRegex.exec(fileContent)) !== null) {
+                    const href = match[2];
+                    const resolvedHref = resolveHref(href, page);
+                    if (resolvedHref && (path.normalize(resolvedHref) === path.normalize(filePath) || resolvedHref.includes(`${dir.split('wwwroot').pop() + '/' + item.toLowerCase()}`))) {
+                        relationships.push(relationshipUrl);
+                    }
+                }
+            }
+        }
+        return Array.from(new Set(relationships));
+    } catch (e) {
+        console.log(e);
+        return [];
+    }
+}
+
+function resolveHref(href, page) {
+    if (href.startsWith('http://') || href.startsWith('https://')) {
+        return href;
+    }
+    const resolvedPath = path.resolve(path.dirname(page), href);
+    return resolvedPath;
+}
+
+async function getDirRecursive(dir) {
+    try {
+        const items = await fsPromise.readdir(dir);
+        let files = [];
+
+        const pushToFiles = async (matches, item, ext, url, numberOfMatches, context) => {
+            const stats = fs.statSync(`${dir}`);
+            const birthtime = stats.birthtime;
+            const modified = stats.mtime;
+            const relationships = await checkRelationshipsForFile(item, ext, dir);
+            files.push({
+                FILE: item,
+                CONTEXT: context,
+                URL: url,
+                FILE_TYPE: ext,
+                KEYWORD_MATCHES: matches,
+                NUMBER_OF_MATCHES: numberOfMatches,
+                ROOT_FOLDER: dir.split("/")[2],
+                CREATION_DATE: birthtime,
+                MODIFIED_DATE: modified,
+                RELATIONSHIPS: relationships.length ? relationships : 'N/A'
+            });
+        };
+
+        for (const item of items) {
+            const ext = item.split(".").pop();
+            const filePath = `${dir}/${item}`;
+            const url = `${baseURI}${dir.split('wwwroot/').pop()}/${item}`;
+            if ((await fsPromise.lstat(filePath)).isDirectory())
+                files = [...files, ...(await getDirRecursive(filePath))];
+            else if (fileExt.some((x) => ext.includes(x))) {
+                await fsPromise.lstat(filePath).then(async res => {
+                    if (res.size > 0 && !dir.includes('_misc_assets') && !dir.includes('_testing')) {
+                        if (ext === "html") {
+                            const html = HTMLParser.parse(fs.readFileSync(filePath, 'utf-8'), {
+                                comment: false,
+                                blockTextElements: { script: false, style: false, noscript: false },
+                                voidTag: { tags: ['script'], closingSlash: false }
+                            });
+                            let titleRegExp = /(?<=<title>)(.*?)(?=<\/title>)/gis;
+                            let title = html.innerHTML.match(titleRegExp);
+                            title = String(title).replace(/\s{2,}/g, "").replace('&amp;', '&');
+                            try {
+                                const checkMatches = findKeywordsAndContext(html.rawText, mainKeywords, secondaryKeywords);
+                                if (checkMatches.uniqueKeywordMatches.length) {
+                                    pushToFiles(checkMatches.uniqueKeywordMatches, title, ext, url, checkMatches.context.length, checkMatches.context);
+                                }
+                            } catch (e) {
+                                console.log(url);
+                            }
+                        } else if (ext === 'pptx') {
+                            async function getTextFromPPTX(arrayBuffer) {
+                                try {
+                                    const zip = new JSZip();
+                                    await zip.loadAsync(arrayBuffer);
+                                    const aNamespace = "http://schemas.openxmlformats.org/drawingml/2006/main";
+                                    let text = "";
+                                    let slideIndex = 1;
+                                    while (true) {
+                                        const slideFile = zip.file(`ppt/slides/slide${slideIndex}.xml`);
+                                        if (!slideFile) break;
+                                        const slideXmlStr = await slideFile.async("text");
+                                        const parser = new DOMParser();
+                                        const xmlDoc = parser.parseFromString(slideXmlStr, "application/xml");
+                                        text += getTextFromNodes(xmlDoc, "t", aNamespace) + " ";
+                                        slideIndex++;
+                                    }
+                                    return text;
+                                } catch (e) {
+                                    console.error(e);
+                                }
+                            }
+                            function getTextFromNodes(node, tagName, namespaceURI) {
+                                let text = '';
+                                const textNodes = node.getElementsByTagNameNS(namespaceURI, tagName);
+                                for (let i = 0; i < textNodes.length; i++) {
+                                    text += textNodes[i].textContent + ' ';
+                                }
+                                return text.trim();
+                            }
+                            const data = await getTextFromPPTX(fs.readFileSync(filePath));
+                            const value = data.toLowerCase();
+                            try {
+                                const checkMatches = findKeywordsAndContext(value, mainKeywords, secondaryKeywords);
+                                if (checkMatches.uniqueKeywordMatches.length) {
+                                    pushToFiles(checkMatches.uniqueKeywordMatches, item, ext, url, checkMatches.context.length, checkMatches.context);
+                                }
+                            } catch (e) {
+                                console.log(url);
+                            }
+                        } else if (ext === "xlsx") {
+                            const worksheets = xlsx.parse(filePath).worksheets;
+                            let value;
+                            if (worksheets.length) {
+                                worksheets[0].data.forEach(x => {
+                                    x.forEach(xx => {
+                                        value += xx.value;
+                                    });
+                                });
+                            }
+                            value = String(value).toLowerCase();
+                            try {
+                                const checkMatches = findKeywordsAndContext(value, mainKeywords, secondaryKeywords);
+                                if (checkMatches.uniqueKeywordMatches.length) {
+                                    pushToFiles(checkMatches.uniqueKeywordMatches, item, ext, url, checkMatches.context.length, checkMatches.context);
+                                }
+                            } catch (e) {
+                                console.log(url);
+                            }
+                        } else if (ext === "docx") {
+                            await mammoth.extractRawText({ path: filePath }).then((res) => {
+                                const value = String(res.value).toLowerCase();
+                                try {
+                                    const checkMatches = findKeywordsAndContext(value, mainKeywords, secondaryKeywords);
+                                    if (checkMatches.uniqueKeywordMatches.length) {
+                                        pushToFiles(checkMatches.uniqueKeywordMatches, item, ext, url, checkMatches.context.length, checkMatches.context);
+                                    }
+                                } catch (e) {
+                                    console.log(url);
+                                }
+                            }).catch((e) => {
+                                console.log(url);
+                            });
+                        } else if (ext === "pdf") {
+                            const data = await pdf(fs.readFileSync(filePath));
+                            const value = data.text.toLowerCase();
+                            try {
+                                const checkMatches = findKeywordsAndContext(value, mainKeywords, secondaryKeywords);
+                                if (checkMatches.uniqueKeywordMatches.length) {
+                                    pushToFiles(checkMatches.uniqueKeywordMatches, item, ext, url, checkMatches.context.length, checkMatches.context);
+                                }
+                            } catch (e) {
+                                console.log(url);
+                            }
+                        } else if (ext === 'doc') {
+                            const extractor = new WordExtractor();
+                            await extractor.extract(filePath).then(async res => {
+                                const value = res.getBody();
+                                try {
+                                    const checkMatches = findKeywordsAndContext(value, mainKeywords, secondaryKeywords);
+                                    if (checkMatches.uniqueKeywordMatches.length) {
+                                        pushToFiles(checkMatches.uniqueKeywordMatches, item, ext, url, checkMatches.context.length, checkMatches.context);
+                                    }
+                                } catch (e) {
+                                    console.log(url);
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+        }
+        return files;
+    } catch (err) {
+        console.error(err);
+    }
+}
+
+function findKeywordsAndContext(content, keywords, secondaryKeywords) {
+    const context = [];
+    const uniqueKeywordMatches = [];
+    for (const keyword of keywords) {
+        const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+        if (regex.test(content)) {
+            uniqueKeywordMatches.push(keyword);
+            const match = content.match(regex);
+            if (match) {
+                const matchIndex = match.index;
+                const surroundingTextStart = Math.max(matchIndex - 50, 0);
+                const surroundingTextEnd = Math.min(matchIndex + 50 + keyword.length, content.length);
+                context.push(content.slice(surroundingTextStart, surroundingTextEnd));
+            }
+        }
+    }
+
+    if (uniqueKeywordMatches.length === 0) {
+        for (const keyword of secondaryKeywords) {
+            const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+            if (regex.test(content)) {
+                uniqueKeywordMatches.push(keyword);
+                const match = content.match(regex);
+                if (match) {
+                    const matchIndex = match.index;
+                    const surroundingTextStart = Math.max(matchIndex - 50, 0);
+                    const surroundingTextEnd = Math.min(matchIndex + 50 + keyword.length, content.length);
+                    context.push(content.slice(surroundingTextStart, surroundingTextEnd));
+                }
+            }
+        }
+    }
+
+    return { uniqueKeywordMatches, context };
+}
